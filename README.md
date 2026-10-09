@@ -61,8 +61,3 @@ python douban_top250_spider.py
 
 - 打开文件时，编码从 `encoding='utf-8'` 改成 `encoding='utf-8-sig'`
 - 靠 UTF-8 BOM 字节标记让 Excel 自动识别编码，双击就能正常显示中文，无需额外转码操作
-
-
- 除了上述方法，还有哪些解决反爬问题的办法？
-
- 除了上述方法，还有哪些解决短评字段提取问题的办法？
