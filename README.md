@@ -57,7 +57,7 @@ python douban_top250_spider.py
 - 先取节点再判断：`comment_tag = item.find('span', class_='inq')`
 - 非空兜底赋值：`comment = comment_tag.text.strip() if comment_tag else "暂无短评"`
 - 把单条电影的解析逻辑全部包裹在 `try-except` 里，单条解析失败不影响其余数据采集
-  ### 3. CSV 文件用 Excel 打开中文乱码
+### 3. CSV 文件用 Excel 打开中文乱码
 
 **具体困难**：用默认 `utf-8` 编码保存 CSV 后，Windows Excel 打开时所有中文字符显示为乱码，需要手动用记事本转码才能查看。
 **具体解决**：
