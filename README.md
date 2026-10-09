@@ -24,12 +24,13 @@
 | douban_top250.csv | 最终爬取结果，包含 250 条电影结构化数据 |
 
 ## 运行方式
-1.  安装依赖
+1.安装依赖
 ```bash
 pip install requests beautifulsoup4
 ```
 2.运行脚本
-python douban_top250_spider.py
+```python douban_top250_spider.py```
+
 3.运行完成后，当前目录生成结果文件 `douban_top250.csv`
 
 ## 项目成果
