@@ -29,7 +29,9 @@
 pip install requests beautifulsoup4
 ```
 2.运行脚本
-```python douban_top250_spider.py```
+```bash
+python douban_top250_spider.py
+```
 
 3.运行完成后，当前目录生成结果文件 `douban_top250.csv`
 
