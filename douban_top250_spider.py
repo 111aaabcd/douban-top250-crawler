@@ -1,120 +1,147 @@
-import requests
-from bs4 import BeautifulSoup
+"""Fetch Douban Top250 data for learning and portfolio use.
+
+The script collects the fields used by the resume project: rank, movie title,
+rating, and the quote text shown on the list page. Douban page structure and
+access controls may change, so the crawler validates the final dataset instead
+of silently writing a partial result.
+"""
+
+from __future__ import annotations
+
+import argparse
 import csv
 import time
-import re
+from pathlib import Path
+
+import requests
+from bs4 import BeautifulSoup
+
+BASE_URL = "https://movie.douban.com/top250"
+PAGE_SIZE = 25
+EXPECTED_COUNT = 250
+FIELDS = ["排名", "电影名", "评分", "短评"]
+HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://movie.douban.com/",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
 
 
-def crawl_douban_top250():
-    base_url = "https://movie.douban.com/top250"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": "https://movie.douban.com/"
-    }
-    movie_data = []
-
-    for start in range(0, 250, 25):
-        url = f"{base_url}?start={start}"
-        response = requests.get(url, headers=headers)
-        response.encoding = 'utf-8'
-
-        soup = BeautifulSoup(response.text, features='html.parser')
-        movie_items = soup.find_all('div', class_='item')
-
-        for item in movie_items:
-            # 排名
-            rank_tag = item.find('em')
-            rank = rank_tag.text.strip() if rank_tag else ""
-
-            # 电影名 + 详情页链接
-            title_tag = item.find('span', class_='title')
-            title = title_tag.text.strip() if title_tag else ""
-            link_tag = item.find('a')
-            detail_url = link_tag['href'] if link_tag else ""
-
-            # 评分
-            rating_tag = item.find('span', class_='rating_num')
-            rating = rating_tag.text.strip() if rating_tag else ""
-
-            # 列表页短评提取
-            quote_text = ""
-            inq_span = item.select_one('div.bd p.quote span.inq')
-            if inq_span:
-                quote_text = inq_span.get_text(strip=True)
-            if not quote_text:
-                quote_p = item.select_one('div.bd p.quote')
-                if quote_p:
-                    quote_text = quote_p.get_text(strip=True)
-            if not quote_text:
-                all_inq = item.select('span.inq')
-                for s in all_inq:
-                    text = s.get_text(strip=True)
-                    if text:
-                        quote_text = text
-                        break
-
-            movie_data.append([rank, title, rating, quote_text, detail_url])
-
-        time.sleep(3)
-        print(f"已爬取第 {start//25 + 1} 页")
-
-    return movie_data
+def fetch_page(session: requests.Session, start: int, retries: int = 3, timeout: int = 15) -> str:
+    """Request one Top250 page with bounded retries."""
+    for attempt in range(retries):
+        try:
+            response = session.get(BASE_URL, params={"start": start}, headers=HEADERS, timeout=timeout)
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as exc:
+            if attempt == retries - 1:
+                raise RuntimeError(f"failed to fetch page start={start}") from exc
+            time.sleep(2 ** attempt)
+    raise RuntimeError("unreachable retry state")
 
 
-def fill_missing_quotes(movie_data):
-    """补全没有短评的电影：从详情页爬第一条热门短评"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "zh-CN,zh;q=0.9"
-    }
-    count = 0
-
-    for row in movie_data:
-        rank, title, rating, quote, detail_url = row
-        if not quote and detail_url:
-            try:
-                response = requests.get(detail_url, headers=headers, timeout=10)
-                response.encoding = 'utf-8'
-                soup = BeautifulSoup(response.text, 'html.parser')
-
-                # 提取第一条热门短评
-                first_comment = soup.select_one('div.comment-item p span.short')
-                if first_comment:
-                    quote = first_comment.get_text(strip=True)
-                    row[3] = quote
-                    count += 1
-                    print(f"已补全：{rank} {title} —— {quote}")
-
-                time.sleep(2)  # 详情页慢一点，防封
-            except Exception as e:
-                print(f"补全失败 {title}: {e}")
-                continue
-
-    print(f"共补全 {count} 条短评")
-    return movie_data
+def parse_movies(html: str) -> list[dict[str, str]]:
+    """Parse rank, title, rating and quote from one list page."""
+    soup = BeautifulSoup(html, "html.parser")
+    records: list[dict[str, str]] = []
+    for item in soup.select("ol.grid_view > li"):
+        rank = item.select_one("em")
+        title = item.select_one("span.title")
+        rating = item.select_one("span.rating_num")
+        quote = item.select_one("span.inq")
+        if not (rank and title and rating):
+            continue
+        records.append(
+            {
+                "排名": rank.get_text(strip=True),
+                "电影名": title.get_text(strip=True),
+                "评分": rating.get_text(strip=True),
+                "短评": quote.get_text(strip=True) if quote else "",
+            }
+        )
+    return records
 
 
-def save_to_csv(data):
-    with open('douban_top250.csv', 'w', newline='', encoding='utf-8-sig') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(['排名', '电影名', '评分', '短评'])
-        for row in data:
-            # 只存前4列，去掉详情页链接
-            writer.writerow(row[:4])
-    print("CSV 保存完成")
+def crawl_top250(delay_seconds: float = 1.0) -> list[dict[str, str]]:
+    """Fetch all ten list pages."""
+    movies: list[dict[str, str]] = []
+    with requests.Session() as session:
+        for start in range(0, EXPECTED_COUNT, PAGE_SIZE):
+            movies.extend(parse_movies(fetch_page(session, start)))
+            print(f"fetched page {start // PAGE_SIZE + 1}")
+            time.sleep(delay_seconds)
+    return movies
+
+
+def validate_records(records: list[dict[str, str]], expected_count: int = EXPECTED_COUNT) -> None:
+    """Validate the portfolio CSV before writing it."""
+    if len(records) != expected_count:
+        raise ValueError(
+            f"expected {expected_count} records, got {len(records)}; "
+            "check whether Douban blocked the request or changed the page structure"
+        )
+
+    ranks: list[int] = []
+    titles: set[str] = set()
+    for index, record in enumerate(records, start=1):
+        try:
+            rank = int(record["排名"])
+            rating = float(record["评分"])
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"invalid rank or rating at parsed row {index}: {record}") from exc
+        if not record.get("电影名", "").strip():
+            raise ValueError(f"missing movie title at parsed row {index}")
+        if not 0 <= rating <= 10:
+            raise ValueError(f"rating out of range at parsed row {index}: {rating}")
+        ranks.append(rank)
+        titles.add(record["电影名"])
+
+    expected_ranks = list(range(1, expected_count + 1))
+    if ranks != expected_ranks:
+        raise ValueError("rank sequence is incomplete or out of order")
+    if len(titles) != len(records):
+        raise ValueError("duplicate movie titles found")
+
+
+def save_to_csv(records: list[dict[str, str]], output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", newline="", encoding="utf-8-sig") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=FIELDS)
+        writer.writeheader()
+        writer.writerows(records)
+    print(f"saved {len(records)} records to {output}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fetch Douban Top250 movie records.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("douban_top250.csv"),
+        help="CSV path to write. Defaults to douban_top250.csv in the current directory.",
+    )
+    parser.add_argument("--delay", type=float, default=1.0, help="Seconds to wait between page requests.")
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Write CSV even if fewer than 250 records are fetched.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    data = crawl_top250(delay_seconds=args.delay)
+    if not args.allow_partial:
+        validate_records(data)
+    save_to_csv(data, args.output)
 
 
 if __name__ == "__main__":
-    data = crawl_douban_top250()
-
-    # 补全缺失的短评（不需要可以注释掉这行）
-    data = fill_missing_quotes(data)
-
-    # 剩余空值统一填充
-    for row in data:
-        if not row[3]:
-            row[3] = "无官方短评"
-
-    save_to_csv(data)
+    main()
